@@ -32,7 +32,7 @@ final curation of Medata and trait data
 
 * `medata_multistressor.rdata` - medata clean for this project
 
-* `species_traits_multistressor.rdata` - trait data clean for this project
+* `species_traits_multistressor.rdata` - trait data clean for this project with imputations
 
 * `site_biomass.rdata` - table of the native and total biomass per site
 
@@ -481,13 +481,12 @@ biomass_commer<-biomass_commer %>% mutate(Native_biomass = Native_biomass/1000,I
 ### (7) save data
 
 
-
 ```{r}
 
 
 #save(medata, file = here("2_data_for_analyses", "medata_multistressor.rdata")) # medata clean for this project
 
-#save(species_traits, file = here("2_data_for_analyses", "species_traits_multistressor.rdata")) #t rait data clean for this project
+#save(species_traits, file = here("2_data_for_analyses", "species_traits_multistressor.rdata")) # trait data clean for this project with imputations
 
 #save(site_biomass, file = here("2_data_for_analyses", "site_biomass.rdata")) # table of the native and total biomass per site
 

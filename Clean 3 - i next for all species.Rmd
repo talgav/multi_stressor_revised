@@ -1,5 +1,5 @@
 ---
-title: "Clean 2 - i next for native species"
+title: "Clean 3 - i next for all species"
 author: "TG"
 date: "2026-05-14"
 output:
@@ -8,9 +8,10 @@ output:
     highlight: github
 ---
 
+
 # In this script:
 
-i-next calculation to rarefy TD and FD diversity for native communities
+i-next calculation to rarafy TD and FD diversity for native communities
 
 *Input data:*
 
@@ -23,18 +24,18 @@ i-next calculation to rarefy TD and FD diversity for native communities
 
 * input files are at `2_data_for_analyses` folder
 
+
 *output data:*
 
-* `diversity_table_natives.rdata` - rarefied TD and FD diversities of native communities
+* `diversity_table_all_species.rdata` - rarefied TD and FD diversities of native communities
 
-* `results_FD_native_only.Rdata` - since it computational heavy this sub-table is also saved for easier down stream code fixes 
+* `results_FD_all_species.Rdata` - since it computational heavy this sub-table is also saved for easier down stream code fixes 
 
 * outputs saved in `3_diversity tables` folder
 
-### Load packeges
+## Load packeges
 
-```{r message=FALSE, warning=FALSE}
-
+```{r}
 library(iNEXT.3D)
 library(tidyverse)
 library(vegan)
@@ -54,45 +55,39 @@ select<-dplyr::select
 
 ```
 
-### load data
 
 ```{r}
 
 load(here("2_data_for_analyses", "medata_multistressor.rdata"))
-
 load(here("2_data_for_analyses", "species_traits_multistressor.rdata"))
-
 load(here("2_data_for_analyses", "site_biomass.rdata"))
 
 ```
 
 
-### (1) separte the native data
 
-convert medata to wide format (natives only)
+### (1) preper data - all species
+
+convert medata to wide format 
 
 
 ```{r}
 
-medata_native<-medata %>% filter(exotic == "Native")
 
+medata_all<-medata %>% group_by(across(1:23)) %>% summarise(amount = sum(sp.n)) %>% ungroup() # sum the individuals from the same species in each transect
 
-
-medata_native<-medata_native %>% group_by(across(1:23)) %>% summarise(amount = sum(sp.n)) %>% ungroup() # sum the individuals from the same species in each transect
-
-medata_native_wide<-spread(medata_native,species,amount,fill = 0)
+medata_all_wide<-spread(medata_all,species,amount,fill = 0)
 
 
 ```
 
 
-keep trait for natives only
-
+keep trait for all species, remove exotic column
 
 ```{r}
-species_traits_native<-species_traits %>% filter(exotic=="Native")
 
-species_traits_native$exotic<- NULL
+species_traits$exotic<- NULL
+
 ```
 
 
@@ -103,7 +98,7 @@ convert to gower distance matrix and save in "data.matrix" format
 
 # add the species as row names
 
-my_traits <- species_traits_native %>%  column_to_rownames(var="species") 
+my_traits <- species_traits %>%  column_to_rownames(var="species") 
 
 
 traits_gower_dist <- gowdis(my_traits)
@@ -119,7 +114,7 @@ site_id = combination of site,enforcement and temperature
 
 
 ```{r}
-site_id<-medata_native_wide %>%
+site_id<-medata_all_wide %>%
   mutate(site_id = paste(Site,enforcement,tmean,sep="_"),.after = Site) %>% drop_na(tmean)
 
 # keep just the id_column and the species and unite the counts 
@@ -139,12 +134,12 @@ site_id<- t(site_id)
 
 ```
 
-see which species are in the data but don't have traits
+see which species are in the data but dont have traits
 
 ```{r}
 test<-rownames(site_id)
 
-test[which(!test %in% species_traits_native$species)]
+test[which(!test %in% species_traits$species)]
 ```
 
 
@@ -169,6 +164,9 @@ c_min
 
 c_max<-min(covrage_info$`SC(2n)`)
 
+# the c_min of the only native community
+
+c_min<-0.9540893
 ```
 
 now ill calculate the TD and FD according to those coverage values
@@ -191,7 +189,7 @@ results_td<-results_td %>%
 # connect to the medata
 
 
-meta.data<-medata_native_wide %>% 
+meta.data<-medata_all_wide %>% 
   mutate(Assemblage = paste(Site,enforcement,tmean,sep="_"),.after = Site) %>%  
   drop_na(tmean) %>%
   select(Assemblage,Basin,Site,enforcement,protection,tmean) %>%
@@ -209,7 +207,9 @@ td.diversity$enforcement<-as.factor(td.diversity$enforcement)
 
 convert to wide data set
 
-use cmin, sc(n) = 0.9509548
+use cmin from the native only diversity
+
+c_min<-0.9540893
 
 ```{r}
 
@@ -264,13 +264,13 @@ run the coverage analyses
 #           FDdistM = traits_gower_matrix,# dim 1:75,1:75
 #           datatype = "abundance",
 #           base = "coverage",
-#           level = c(c_min,c_max))
+#           level = c(c_min))
 
 
+#save(results_FD, file = here("3_diversity tables", "results_FD_all_species.Rdata"))
 
-#save(results_FD, file = here("3_diversity tables", "results_FD_native_only.Rdata"))
+load(here("3_diversity tables", "results_FD_all_species.Rdata"))
 
-load(here("3_diversity tables", "results_FD_native_only.Rdata"))
 ```
 
 
@@ -291,7 +291,7 @@ fd.diversity$enforcement<-as.factor(fd.diversity$enforcement)
 
 fd_table<-fd.diversity
 
-fd_table<-fd_table %>% filter(sc_type=="Cmin")%>%  select(c(11:15,SC,Assemblage,Order.q,qFD))
+fd_table<-fd_table %>%  select(c(11:15,SC,Assemblage,Order.q,qFD))
 
 fd_table<-fd_table %>% mutate(Order.q = case_when(
   Order.q == 0 ~ "FD_richness",
@@ -313,7 +313,8 @@ last cleaning
 diversity_table$site_id<-NULL
 
 diversity_table<-diversity_table %>% rename( Native_biomass=mean_native_biomass,
-                                             Invasive_biomass=mean_invasive_biomass)
+                                             Invasive_biomass=mean_invasive_biomass,
+                                             Total_biomass=mean_total_biomass)
 
 diversity_table<-diversity_table %>% 
   relocate(Native_biomass,.after = FD_simpson)%>%
@@ -321,8 +322,7 @@ diversity_table<-diversity_table %>%
 
 
 diversity_table<-diversity_table %>% 
-  relocate(mean_total_biomass,.after = Invasive_biomass )%>% rename(Total_biomass = mean_total_biomass)
-
+  relocate(Total_biomass,.after = Invasive_biomass )
 
 diversity_table$protection<-as.factor(diversity_table$protection)
   
@@ -344,15 +344,15 @@ diversity_table$data.origin<-as.factor(diversity_table$data.origin)
 diversity_table<-diversity_table %>% 
   relocate(data.origin,.before = Basin )
 
-
-
 ```
 
 # save sites diversity tables
 
 ```{r}
+diversity_table_all<-diversity_table
 
-#save(diversity_table, file = here("3_diversity tables", "diversity_table_natives.rdata"))
+#save(diversity_table_all, file = here("3_diversity tables", "diversity_table_all.rdata"))
+
 ```
 
 
