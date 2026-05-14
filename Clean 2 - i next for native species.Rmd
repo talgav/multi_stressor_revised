@@ -1,0 +1,356 @@
+---
+title: "Clean 2 - i next for native species"
+author: "TG"
+date: "2026-05-14"
+output:
+   prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+# In this script:
+
+i-next calculation to rarefy TD and FD diversity for native communities
+
+*Input data:*
+
+
+* `medata_multistressor.rdata` - medata clean for this project
+
+* `species_traits_multistressor.rdata` - traits data clean for this project with imputations
+
+* `site_biomass.rdata` - table of the native and total biomass per site
+
+
+*output data:*
+
+* `diversity_table_natives.rdata` - rarefied TD and FD diversities of native communities
+
+* `results_FD_native_only.Rdata` - since it computational heavy this sub-table is also saved for easier down stream code fixes 
+
+### Load packeges
+
+```{r message=FALSE, warning=FALSE}
+
+library(iNEXT.3D)
+library(tidyverse)
+library(vegan)
+library(plotrix)
+library(sjPlot)
+library(sjmisc)
+library(gridExtra)
+library(ggeffects)
+library(vegan)
+library(plotly)
+library(FD)
+library(mFD)
+library(funrar)
+library(here)
+
+select<-dplyr::select
+
+```
+
+### load data
+
+```{r}
+
+load(here("2_data_for_analyses", "medata_multistressor.rdata"))
+
+load(here("2_data_for_analyses", "species_traits_multistressor.rdata"))
+
+load(here("2_data_for_analyses", "site_biomass.rdata"))
+
+```
+
+
+### (1) separte the native data
+
+convert medata to wide format (natives only)
+
+
+```{r}
+
+medata_native<-medata %>% filter(exotic == "Native")
+
+
+
+medata_native<-medata_native %>% group_by(across(1:23)) %>% summarise(amount = sum(sp.n)) %>% ungroup() # sum the individuals from the same species in each transect
+
+medata_native_wide<-spread(medata_native,species,amount,fill = 0)
+
+
+```
+
+
+keep trait for natives only
+
+
+```{r}
+species_traits_native<-species_traits %>% filter(exotic=="Native")
+
+species_traits_native$exotic<- NULL
+```
+
+
+convert to gower distance matrix and save in "data.matrix" format
+
+
+```{r include=FALSE}
+
+# add the species as row names
+
+my_traits <- species_traits_native %>%  column_to_rownames(var="species") 
+
+
+traits_gower_dist <- gowdis(my_traits)
+traits_gower_matrix<-data.matrix(traits_gower_dist)
+
+```
+
+# Diversity indeces
+
+## Calculate the covrage at the site id level
+
+site_id = combination of site,enforcement and temperature
+
+
+```{r}
+site_id<-medata_native_wide %>%
+  mutate(site_id = paste(Site,enforcement,tmean,sep="_"),.after = Site) %>% drop_na(tmean)
+
+# keep just the id_column and the species and unite the counts 
+
+site_id<- site_id %>%
+  select(site_id,23:ncol(site_id)) %>%
+  group_by(site_id) %>%
+  summarise(across(.fns = sum), .groups = "drop")
+
+# move the id_column to be the rowname
+
+site_id<-site_id %>% column_to_rownames(var = 'site_id')
+
+# transpose so the species are in the rows and site in column
+
+site_id<- t(site_id)
+
+```
+
+see which species are in the data but don't have traits
+
+```{r}
+test<-rownames(site_id)
+
+test[which(!test %in% species_traits_native$species)]
+```
+
+
+
+Calculate the sampling coverage per site 
+
+
+```{r}
+covrage_info <- DataInfo3D(site_id,
+                                 diversity = "TD",
+                                 datatype = "abundance")
+
+```
+
+
+now Ill calculate the Cmin and Cmax
+
+```{r}
+c_min<-min(covrage_info$`SC(n)`)
+
+c_min
+
+c_max<-min(covrage_info$`SC(2n)`)
+
+```
+
+now ill calculate the TD and FD according to those coverage values
+
+```{r}
+
+results_td<- estimate3D(site_id,
+          diversity = 'TD',
+          q = c(0,1,2),
+          datatype = "abundance",
+          base = "coverage",
+          level = c(c_min,c_max))
+
+# add whether we used Cmin or Cmax
+
+results_td<-results_td %>%
+  mutate("sc_type"= case_when(SC == min(SC)~ "Cmin",
+                              SC ==max(SC)~ "Cmax"),.after = SC)
+
+# connect to the medata
+
+
+meta.data<-medata_native_wide %>% 
+  mutate(Assemblage = paste(Site,enforcement,tmean,sep="_"),.after = Site) %>%  
+  drop_na(tmean) %>%
+  select(Assemblage,Basin,Site,enforcement,protection,tmean) %>%
+  distinct(Assemblage,.keep_all = T)
+
+# join with the TD (normalized to covrage)
+
+td.diversity<-left_join(results_td,meta.data)
+
+# convert enforcement to factor
+
+td.diversity$enforcement<-as.factor(td.diversity$enforcement)
+
+```
+
+convert to wide data set
+
+use cmin, sc(n) = 0.9509548
+
+```{r}
+
+
+diversity_table<-td.diversity
+
+diversity_table<-diversity_table %>% filter(sc_type=="Cmin")%>%  select(c(11:15,SC,Assemblage,Order.q,qTD))
+
+diversity_table<-diversity_table %>% mutate(Order.q = case_when(
+  Order.q == 0 ~ "TD_richness",
+  Order.q == 1 ~ "TD_shannon",
+  Order.q == 2 ~ "TD_simpson"
+))
+
+diversity_table<- spread(diversity_table,key =Order.q,value = qTD)
+
+diversity_table<-left_join(diversity_table,site_biomass)
+
+```
+### Functional diversity per site 
+
+```{r}
+
+# list of the species i have trait data for them
+
+keep <- rownames(traits_gower_matrix)
+
+# filter the data accordingly
+
+site_id_fd<-as.data.frame(site_id)
+
+site_id_fd <-site_id_fd %>% filter(row.names(site_id_fd) %in% keep)
+
+# convert back to data.matrix
+
+site_id_fd<-data.matrix(site_id_fd)
+
+
+```
+
+
+run the coverage analyses 
+
+*note* -  take long time, better do over the night if need to re-run or load to output
+
+
+
+```{r}
+# results_FD <- estimate3D(site_id_fd,# dim 1:75,1:128
+#           diversity = 'FD',
+#           q = c(0,1,2),
+#           FDdistM = traits_gower_matrix,# dim 1:75,1:75
+#           datatype = "abundance",
+#           base = "coverage",
+#           level = c(c_min,c_max))
+
+
+
+#save(results_FD, file = here("3_diversity tables", "results_FD_native_only.Rdata"))
+
+load(here("3_diversity tables", "results_FD_native_only.Rdata"))
+```
+
+
+
+```{r}
+results_FD<-results_FD %>%
+  mutate("sc_type"= case_when(SC == min(SC)~ "Cmin",
+                              SC ==max(SC)~ "Cmax"),.after = SC)
+
+fd.diversity<-left_join(results_FD,meta.data)
+
+# convert enforcement to factor
+
+fd.diversity$enforcement<-as.factor(fd.diversity$enforcement)
+
+
+# convert to wide format
+
+fd_table<-fd.diversity
+
+fd_table<-fd_table %>% filter(sc_type=="Cmin")%>%  select(c(11:15,SC,Assemblage,Order.q,qFD))
+
+fd_table<-fd_table %>% mutate(Order.q = case_when(
+  Order.q == 0 ~ "FD_richness",
+  Order.q == 1 ~ "FD_shannon",
+  Order.q == 2 ~ "FD_simpson"
+))
+
+fd_table<- spread(fd_table,key =Order.q,value = qFD)
+
+# Join with the diversity table
+
+
+diversity_table <-left_join(diversity_table,fd_table)
+
+```
+last cleaning 
+
+```{r}
+diversity_table$site_id<-NULL
+
+diversity_table<-diversity_table %>% rename( Native_biomass=mean_native_biomass,
+                                             Invasive_biomass=mean_invasive_biomass)
+
+diversity_table<-diversity_table %>% 
+  relocate(Native_biomass,.after = FD_simpson)%>%
+  relocate(Invasive_biomass,.after = FD_simpson) 
+
+
+diversity_table<-diversity_table %>% 
+  relocate(mean_total_biomass,.after = Native_biomass )%>% rename(Total_biomass = mean_total_biomass)
+
+
+diversity_table$protection<-as.factor(diversity_table$protection)
+  
+```
+
+
+add data origin to diversity table
+
+```{r}
+data_origin<-medata %>% distinct(data.origin,Site)
+
+data_origin$data.origin[data_origin$data.origin=="azz_asi"]<-"Azzurro"
+data_origin$data.origin[data_origin$data.origin=="azz_malt"]<-"Azzurro"
+
+diversity_table<-left_join(diversity_table,data_origin)
+
+diversity_table$data.origin<-as.factor(diversity_table$data.origin)
+
+diversity_table<-diversity_table %>% 
+  relocate(data.origin,.before = Basin )
+
+
+
+```
+
+# save sites diversity tables
+
+```{r}
+
+#save(diversity_table, file = here("3_diversity tables", "diversity_table_natives.rdata"))
+```
+
+
+
