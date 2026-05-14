@@ -7,3 +7,495 @@ output:
     theme: cayman
     highlight: github
 ---
+# In this script:
+
+final curation of Medata and trait data
+
+*Input data:*
+
+
+* `Clean_Medata_lis.Rdata` - the Medata after DD script cleaning
+
+* `env_var.Rdata` -  updated bio-orcal environmental data 
+
+* `trait_data_cleaned.csv`- traits data from Avary
+
+* `trait_imputed.csv`- imputed traits data from Belmaker lab FD hackathon 
+
+* `ab_full.csv` -  conversion coefficient table
+
+* `missing_commercial_full.csv`- species commercial value
+
+*  all data stored in the `1_raw_input_data` folder
+
+*Output data:*
+
+* `medata_multistressor.rdata` - medata clean for this project
+
+* `species_traits_multistressor.rdata` - trait data clean for this project
+
+* `site_biomass.rdata` - table of the native and total biomass per site
+
+* `site_biomass_commercial.rdata` - native and invasive biomass per site & commercial value 
+
+* `final_commercial_list.rdata`- the final list of the species commercial values
+
+*  all output saved in the `2_data_for_analyses` folder
+
+
+
+### Load packeges
+
+```{r message=FALSE, warning=FALSE}
+library(iNEXT.3D)
+library(tidyverse)
+library(vegan)
+library(plotrix)
+library(sjPlot)
+library(sjmisc)
+library(gridExtra)
+library(ggeffects)
+library(vegan)
+library(plotly)
+library(FD)
+library(mFD)
+library(funrar)
+library(here)
+
+select<-dplyr::select
+
+```
+
+
+
+# load data
+
+```{r message=FALSE, warning=FALSE}
+
+load(here("1_raw_input_data", "Clean_Medata_lis.Rdata"))
+load(here("1_raw_input_data", "env_var.Rdata"))
+
+ab_full <- read_csv(here("1_raw_input_data", "ab_full.csv"))
+trait_imputed <- read_csv(here("1_raw_input_data", "Imputed_data_inc_NIS.csv"))
+trait <- read_csv(here("1_raw_input_data", "trait_data_cleaned.csv"))
+commercial_full <- read_csv(here("1_raw_input_data", "missing_commercial_full.csv"))
+
+```
+
+
+
+### (1) Add temperature data 
+
+Add from the updated `env_var` which include the new Lisandro data as well as mean values for 9 location that bio-oracle did not have information on (done based on the other location in the site)
+
+```{r}
+col_order<-colnames(medata)
+
+# remove env old column
+
+medata<-medata %>% select(-tmean,-sal_mean,-pp_mean)
+
+# join with the new env data
+
+medata<-left_join(medata,env_var)
+
+# set back to the same column order
+
+medata<-medata %>% select(all_of(col_order))
+
+# clean the r environment
+
+rm(env_var)
+rm(col_order)
+
+```
+
+### (2) Add a and b coeffitents and biomass calculation
+
+
+```{r include=FALSE}
+
+# keep only metadate and abundances
+
+medata<-medata %>% select(1:24) 
+
+# Add a & b and native or invasive data
+
+medata<- left_join(medata,ab_full)
+
+# fix weird observation
+
+medata$sp.length[medata$species =="Symphodus.tinca" & medata$sp.length == 120 & is.na(medata$sp.length) == F]<-12
+
+medata$sp.n[medata$species =="Balistes.capriscus" & medata$sp.n == 2000]<-2
+
+medata<-medata %>% mutate(biomass_single = a*sp.length^b) # in gram
+
+
+# biomass * abundance
+
+medata<-medata %>% mutate(biomass = biomass_single*sp.n) # in gram
+
+medata$biomass_single<-NULL
+
+# remove obs of 0 in abundance - some remenents from the access files where insted of delete you had to fill 0 sp.n
+
+
+medata<-medata %>% filter(sp.n>0)
+
+# remove obs of 0 in lenght or NA
+
+
+medata<-medata %>% filter(sp.length>0) %>% drop_na(sp.length)
+
+# convert the species names format to match the trait data
+
+medata<-medata %>% mutate(species = gsub("\\.", " ",species))
+
+# create the site-level identifier 
+
+medata<-medata %>% mutate(site_id = paste(Site,enforcement,tmean,sep="_"),.after = Site)
+
+# remove enforcement = 1 from data
+
+
+medata<-medata %>% filter(enforcement!=1)
+
+# NA in exotic column = Family level id...remove (mostly Clupeidae)
+
+medata<-medata %>% drop_na(exotic)
+
+rm(ab_full)
+
+```
+
+Update some names to match the trait data
+
+```{r include=FALSE}
+
+medata$species[medata$species=="Liza aurata"]<-"Chelon auratus"
+
+medata$species[medata$species=="Oblada melanura"]<-"Oblada melanurus"
+
+medata$species[medata$species=="Pempheris vanicolensis"]<-"Pempheris rhomboidea"
+
+medata$species[medata$species=="Symphodus melanocercus"]<-"Centrolabrus melanocercus"
+
+medata$species[medata$species=="Taeniura grabata"]<-"Taeniurops grabatus"
+
+```
+
+### (3) calculate invasive and native biomass per site & enforcment
+
+
+calculate transects/site native,invasive and total biomass
+
+first calculate as the transect level and than use the mean per site
+
+```{r}
+
+
+# calculate the total biomass of invasive and natives for each transect
+
+transect_biomass <- medata %>%
+  group_by(site_id,Site,tmean,enforcement,unique_trans_id,exotic) %>% 
+  summarise(transect_biomass = sum(biomass,na.rm = T)) # units are g
+
+
+# convert to wide format
+
+transect_biomass<-spread(transect_biomass,exotic,transect_biomass)
+
+
+# convert na in invasive biomass to 0 biomass
+
+
+transect_biomass$Invasive[is.na(transect_biomass$Invasive)]<-0
+
+
+# add total biomass
+
+
+transect_biomass$total_biomass<-(transect_biomass$Invasive+transect_biomass$Native)
+
+
+
+# calculate the mean biomass per site (separated to native and invasive)
+
+site_biomass<-transect_biomass %>% 
+  group_by(site_id,Site,tmean,enforcement) %>% 
+  summarise(mean_invasive_biomass = mean(Invasive,na.rm = T),
+            mean_native_biomass = mean(Native,na.rm = T),
+            mean_total_biomass = mean(total_biomass,na.rm = T))
+            
+
+# convert enforcement to factor
+
+site_biomass$enforcement<-as.factor(site_biomass$enforcement)
+
+
+```
+
+### (4) arrange trait data
+
+check which species have traits
+
+
+```{r include=FALSE}
+
+
+#lets see is the species match
+
+species<- medata %>% distinct(species)
+
+# change traits data colnames
+
+trait_imputed<-trait_imputed %>% rename("species" = "fishbase_name")
+
+species_traits<-left_join(species,trait_imputed)
+
+# add species that are not in the inputed data but have data in the older trait data
+
+not_in_imp<-species_traits %>% filter(is.na(Home_Range)) %>% select(species)
+
+trait<-trait %>% rename("species" = "fishbase_name")
+
+not_in_imp <- left_join(not_in_imp,trait)
+
+```
+
+keep only relevant traits
+
+```{r include=FALSE}
+
+species_traits <- species_traits %>% 
+    drop_na(Family) %>%  # drop the species that dot have data 
+  select(species,Home_Range,Activity,Schooling,Water_Level,Diet)
+
+# same for the species that are not in the imputed data
+
+not_in_imp <- not_in_imp %>% 
+  drop_na(Family) %>%  # drop the species that dot have data 
+  select(species,Home_Range,Activity,Schooling,Water_Level,Diet)
+
+
+# unite
+
+species_traits<-bind_rows(species_traits,not_in_imp)
+
+rm(not_in_imp,trait)
+
+```
+
+get the species max size to use for species size
+
+```{r}
+sp_size <- medata %>%
+  group_by(species) %>%
+  summarise(sp_size = max(sp.length))
+
+# fix weird values
+
+# we only saw juvenile Sphyraena Sphyraena- change to adult size according to common size in fishbase
+
+sp_size$sp_size[sp_size$species=="Sphyraena sphyraena"]<-60
+
+```
+
+add species size based on the data
+
+```{r}
+species_traits<-left_join(species_traits,sp_size)
+
+rm(sp_size)
+```
+
+
+```{r include=FALSE}
+
+# make sure there is no duplicated rows
+
+species_traits <- species_traits %>% distinct(species,Home_Range,Activity,Schooling,Water_Level,Diet,sp_size)
+
+# count how many traits have NA for each species
+
+species_traits$all_na<-rowSums(is.na(species_traits))
+
+species_traits <- species_traits %>%
+  mutate_at(2:6,factor) %>% # convert the character columns to Factors
+  arrange(species) %>% # arrange the species alphabetically (so it would be similar to `my_data` order)
+  filter(all_na<3) %>% # filter species with not enough traits data
+  select(-all_na) # remove this non-trait columns
+
+# add if exotic or native 
+
+exotic_stat<-medata %>% distinct(species,exotic)
+
+species_traits<-left_join(species_traits,exotic_stat)
+
+```
+
+
+```{r include=FALSE}
+
+# order the Home range level
+
+species_traits$Home_Range <- ordered(species_traits$Home_Range,levels = c("Sed","Mob","Vmob")) 
+
+# order the Schooling levels
+
+unique(species_traits$Schooling)
+
+species_traits$Schooling<-droplevels(species_traits$Schooling)
+
+species_traits$Schooling <-ordered(species_traits$Schooling,c("Sol","Pair","SmallG","MedG","LargeG"))
+
+
+# order the water-level levels
+
+species_traits$Water_Level <- ordered(species_traits$Water_Level,c("Bottom","Low","High"))
+
+str(species_traits)
+
+
+
+```
+
+### (5) commercial value data
+
+
+add species commercial data 
+
+```{r}
+species<-medata %>% distinct(species)
+
+# join
+
+commercial<-left_join(species,commercial_full)
+
+# unite low to medium so ill have only 3 levels
+
+commercial$Commercial_value<-ifelse(commercial$Commercial_value=="Low","Medium",commercial$Commercial_value)
+
+# convert to factor
+
+commercial$Commercial_value<-as.factor(commercial$Commercial_value)
+
+# order the factor
+
+commercial$Commercial_value<- ordered(commercial$Commercial_value,levels = c("None","Medium","High")) 
+
+# later i need to revise my classification but now ill remove this column
+
+commercial$source<-NULL
+
+# unite with medata
+
+medata_commer<-left_join(medata,commercial)
+
+# add native or nis to commercial
+
+native<-medata %>% distinct(species,exotic)
+
+commercial<-left_join(commercial,native)
+
+rm(native,commercial_full)
+
+```
+
+calculate the total biomass of invasive and natives for each commercial value for each transect
+
+
+```{r}
+
+transect_biomass_com <- medata_commer %>%
+  group_by(site_id,Site,tmean,enforcement,unique_trans_id,exotic,Commercial_value) %>% 
+  summarise(transect_biomass = sum(biomass,na.rm = T))
+
+
+# calculate the mean biomass per site (separated to native and invasive)
+
+site_biomass_com<-transect_biomass_com %>% 
+  group_by(site_id,Site,tmean,enforcement,exotic,Commercial_value) %>% 
+  summarise(mean_biomass = mean(transect_biomass,na.rm = T))
+
+
+# convert enforcement to factor
+
+site_biomass_com$protection <- ifelse(site_biomass_com$enforcement>0,"Protected","Not protected")
+
+
+site_biomass_com$enforcement<-as.factor(site_biomass_com$enforcement)
+
+
+
+```
+
+
+```{r}
+
+# Im keeping only natives communities biomass
+
+biomass_commer <- site_biomass_com  %>% filter(exotic=="Native")
+
+# remove this column
+
+biomass_commer$exotic<-NULL
+
+#convert to factor
+
+biomass_commer$protection<-as.factor(biomass_commer$protection)
+
+# add invasive species from the site_biomass (not separate to commercial value)
+
+inv_bio<-site_biomass %>% select(site_id,mean_invasive_biomass)
+
+# add invasive biomass (not divided by commercial value)
+
+biomass_commer<-left_join(biomass_commer,inv_bio)
+
+
+# change column names to match to diversity table (created with i-next in the next scripts)
+
+colnames(biomass_commer)<-c("Assemblage","Site","tmean" ,"enforcement","Commercial_value",
+"Native_biomass","protection","Invasive_biomass")
+
+```
+
+### (6) convert all biomass estimations to kg in the data that are saved for letter use
+
+```{r}
+# convert weights to kg
+
+medata <- medata %>% mutate(biomass = biomass/1000)
+
+site_biomass<-site_biomass %>%  mutate(mean_invasive_biomass = mean_invasive_biomass/1000,
+                                       mean_native_biomass = mean_native_biomass/1000,
+                                       mean_total_biomass = mean_total_biomass/1000)
+
+biomass_commer<-biomass_commer %>% mutate(Native_biomass = Native_biomass/1000,Invasive_biomass=Invasive_biomass/1000)
+
+```
+
+
+### (7) save data
+
+
+
+```{r}
+
+
+#save(medata, file = here("2_data_for_analyses", "medata_multistressor.rdata")) # medata clean for this project
+
+#save(species_traits, file = here("2_data_for_analyses", "species_traits_multistressor.rdata")) #t rait data clean for this project
+
+#save(site_biomass, file = here("2_data_for_analyses", "site_biomass.rdata")) # table of the native and total biomass per site
+
+#save(biomass_commer, file = here("2_data_for_analyses", "site_biomass_commercial.rdata"))  #  native and invasive biomass per site & commercial value 
+
+#save(commercial, file = here("2_data_for_analyses", "final_commercial_list.rdata")) # final list of  species commercial values
+
+
+```
+
+
