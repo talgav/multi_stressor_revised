@@ -1,0 +1,120 @@
+---
+title: "Clean 4 - i next null models"
+author: "TG"
+date: "2026-05-14"
+output:
+   prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+# In this script:
+
+i-next calculation to rarefy TD and FD diversity for native communities
+
+*Input data:*
+
+
+* `medata_multistressor.rdata` - medata clean for this project
+
+* `species_traits_multistressor.rdata` - traits data clean for this project with imputations
+
+* `site_biomass.rdata` - table of the native and total biomass per site
+
+* input files are at `2_data_for_analyses` folder
+
+*output data:*
+
+* `diversity_table_natives.rdata` - rarefied TD and FD diversities of native communities
+
+* `results_FD_native_only.Rdata` - since it computational heavy this sub-table is also saved for easier down stream code fixes 
+
+* outputs saved in `3_diversity tables` folder
+
+### Load packeges
+
+```{r message=FALSE, warning=FALSE}
+
+library(iNEXT.3D)
+library(tidyverse)
+library(vegan)
+library(plotrix)
+library(sjPlot)
+library(sjmisc)
+library(gridExtra)
+library(ggeffects)
+library(vegan)
+library(plotly)
+library(FD)
+library(mFD)
+library(funrar)
+library(here)
+
+select<-dplyr::select
+
+```
+
+### load data
+
+```{r}
+
+load(here("2_data_for_analyses", "medata_multistressor.rdata"))
+
+load(here("2_data_for_analyses", "species_traits_multistressor.rdata"))
+
+load(here("2_data_for_analyses", "site_biomass.rdata"))
+
+```
+
+
+### (1) count how many invasive individuals and species i have in each transect (how many native species fillers I need here)
+
+```{r}
+invasive_count <-medata %>% filter(tmean>19) %>%  
+                      group_by(unique_trans_id,exotic) %>% 
+                      summarise(invasive_abundance = sum(sp.n),invasive_species = n_distinct(species)) %>% 
+                      filter(exotic == "Invasive")
+
+invasive_count$exotic<-NULL
+
+
+  
+```
+
+### (2) Build a species pool
+
+based on the natives that are found in temp > 19 degree
+
+```{r}
+
+natives_pool <-medata %>% filter(exotic == "Native") %>%  filter(tmean >19) %>% group_by(species) %>% summarise(total_abundance = sum(sp.n))
+
+```
+
+
+
+### (3) remove invasive from the data and unite with the filling instructions
+
+
+
+```{r}
+medata_19<-medata %>% filter(tmean>19)
+
+medata_19 <- medata_19 %>% filter(exotic == "Native")
+
+medata_19<-left_join(medata_19,invasive_count)
+```
+
+
+
+```{r}
+
+medata_native<-medata %>% filter(exotic == "Native")
+
+
+
+medata_native<-medata_native %>% group_by(across(1:23)) %>% summarise(amount = sum(sp.n)) %>% ungroup() # sum the individuals from the same species in each transect
+
+medata_native_wide<-spread(medata_native,species,amount,fill = 0)
+
+
+```

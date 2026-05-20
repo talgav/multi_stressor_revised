@@ -1,0 +1,655 @@
+---
+title: "Clean 5 - relative importance"
+author: "TG"
+date: "2026-05-15"
+output:
+   prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+# In this script: 
+
+create the relative importance plots for all diversity and biomass facets (including differnt commertial values)
+
+
+*Input data:*
+
+* `diversity_table_natives.rdata` - rarefied TD and FD diversities of native communities
+
+* `medata_multistressor.rdata` - medata clean for this project
+
+* `site_biomass_commercial.rdata`- biomass divided by natives commercial value
+
+* `final_commercial_list.rdata`- the final list of the species commercial values
+
+
+*Output data:*
+
+* all relative importance plots
+
+* ternary plots + interactions for diversity & biomass
+
+* ternary plots for different commercial values 
+
+
+
+### load packages
+
+```{r}
+library(tidyverse)
+library(relaimpo)
+library(patchwork)
+library(ggiraphExtra)
+library(ggeffects)
+library(ggtern)
+select<-dplyr::select
+
+rela_plots<-"4_relative importance"
+
+```
+
+
+
+### load data
+
+```{r}
+
+load(here("2_data_for_analyses", "medata_multistressor.rdata"))
+load(here("2_data_for_analyses", "site_biomass_commercial.rdata"))
+load(here("2_data_for_analyses", "final_commercial_list.rdata"))
+
+load(here("3_diversity tables", "diversity_table_natives.rdata"))
+
+```
+
+
+
+# Create lm
+
+diversity models
+
+
+```{r}
+
+# diversity
+
+TD_richness<-lm(TD_richness ~ tmean + protection + Invasive_biomass,data = diversity_table)
+
+TD_shannon<-lm(TD_shannon ~ tmean + protection + Invasive_biomass,data = diversity_table)
+
+TD_simpson<-lm(log(TD_simpson) ~ tmean + protection + Invasive_biomass,data = diversity_table)
+
+FD_richness<-lm(FD_richness ~ tmean + protection + Invasive_biomass,data = diversity_table)
+
+FD_shannon<-lm(FD_shannon ~ tmean + protection + Invasive_biomass,data = diversity_table)
+
+FD_simpson<-lm(FD_simpson ~ tmean + protection + Invasive_biomass,data = diversity_table)
+
+
+```
+
+biomass model
+
+```{r}
+# split the commercial data by value
+
+high <- biomass_commer %>% filter(Commercial_value=="High")
+medium <- biomass_commer %>% filter(Commercial_value=="Medium")
+none <- biomass_commer %>% filter(Commercial_value=="None")
+
+# check if normal distributions
+
+hist(high$Native_biomass)
+hist(medium$Native_biomass)
+hist(none$Native_biomass)
+
+# nope - convert to log...
+
+hist(log(high$Native_biomass))
+hist(log(medium$Native_biomass))
+hist(log(none$Native_biomass))
+
+```
+
+lm models
+
+```{r}
+
+# biomass (total)
+
+Biomass<-lm(log(Native_biomass) ~ tmean + protection + Invasive_biomass,data = diversity_table)
+
+# set of linear models 
+
+bio_high<-lm(log(Native_biomass)~ tmean + protection + Invasive_biomass,data = high)
+
+bio_medium<-lm(log(Native_biomass)~ tmean + protection + Invasive_biomass,data = medium)
+
+bio_none<-lm(log(Native_biomass)~ tmean + protection + Invasive_biomass,data = none)
+
+```
+
+
+# Relative importance
+
+a function that calculate, plot and save the relative importance for each y
+
+`boot.relimp()` - conducts the bootstrap
+
+`booteval.relimp()` - gets the confidence intervals
+
+it also provide the relative in data fit to plot ternary plots
+
+```{r}
+
+
+plot_my_rela <- function(model, response_name, plot_title = response_name,
+                         save_plot = FALSE, upperl = 1, rela_plots = NULL) {
+  
+  # bootstrap relative importance
+  
+  rl_boot <- boot.relimp(model, b = 1000, rela = TRUE)
+  ci <- booteval.relimp(rl_boot)
+  
+  print(ci)
+  
+  # data for bar plot
+ 
+  data <- as.data.frame(ci@mark)
+  colnames(data) <- c("var_explained", "sign", "lower_ci", "upper_ci")
+  
+  data <- data %>%
+    mutate(
+      var_explained = as.numeric(var_explained),
+      lower_ci = as.numeric(lower_ci),
+      upper_ci = as.numeric(upper_ci),
+      variable = rownames(data),
+      variable = case_when(
+        grepl("tmean", variable) ~ "Temperature",
+        grepl("protection", variable) ~ "Protection",
+        grepl("Invasive_biomass", variable) ~ "NIS"
+      ),
+      variable = ordered(variable, c("Temperature", "Protection", "NIS"))
+    )
+  
+  total_var <- ci@R2
+  
+  # data for ternary plot
+  rela_out <- data %>%
+    select(variable, var_explained) %>%
+    pivot_wider(names_from = variable, values_from = var_explained) %>%
+    mutate(response = response_name) %>%
+    select(response, Temperature, Protection, NIS)
+  
+  # bar plot
+  plot <- ggplot(data = data, aes(x = variable, y = var_explained, fill = variable)) +
+    geom_bar(stat = "identity") +
+    theme_classic() +
+    ylab("Variance explained") +
+    labs(
+      title = plot_title,
+      subtitle = bquote(R^2 == .(round((total_var * 100), 2)) * "%")
+    ) +
+    ylim(0, upperl) +
+    theme(
+      legend.position = "none",
+      axis.title.x = element_blank(),
+      axis.text = element_text(size = 20),
+      axis.title = element_text(size = 24),
+      plot.title = element_text(size = 26, hjust = 0.5),
+      plot.subtitle = element_text(size = 18, hjust = 0.5)
+    ) +
+    scale_fill_manual(values = c("#364D8B", "#03718A", "#30A3D1"))
+  
+  
+  if (save_plot) {
+    plot_name <- paste0("Relative importance - ", plot_title, ".pdf")
+    ggsave(
+      plot = plot,
+      filename = plot_name,
+      width = 10,
+      height = 8,
+      dpi = 300,
+      path = rela_plots
+    )
+  }
+  
+  return(list(
+    plot = plot,
+    rela = rela_out,
+    ci_data = data,
+    R2 = total_var
+  ))
+}
+
+```
+
+
+run over diversity and biomass indeces
+
+```{r}
+
+td_richness_rela <- plot_my_rela(model = TD_richness, response_name = "TD richness", upperl = 0.7, save_plot = FALSE)
+
+td_shannon_rela <- plot_my_rela(model = TD_shannon, response_name = "TD shannon", upperl = 1, save_plot = FALSE)
+
+td_simpson_rela <- plot_my_rela(model = TD_simpson, response_name = "TD simpson", upperl = 1, save_plot = FALSE)
+
+fd_richness_rela <- plot_my_rela(model = FD_richness, response_name = "FD richness", upperl = 0.7, save_plot = FALSE)
+
+fd_shannon_rela <- plot_my_rela(model = FD_shannon, response_name = "FD shannon", upperl = 1, save_plot = FALSE)
+
+fd_simpson_rela <- plot_my_rela(model = FD_simpson, response_name = "FD simpson", upperl = 1, save_plot = FALSE)
+
+biomass_all_rela <- plot_my_rela(model = Biomass, response_name = "Native biomass", upperl = 1, save_plot = FALSE)
+
+biomass_high_rela <- plot_my_rela(model = bio_high, response_name = "High commercial value", upperl = 1, save_plot = FALSE)
+biomass_medium_rela <- plot_my_rela(model = bio_medium, response_name = "Medium commercial value", upperl = 1, save_plot = FALSE)
+biomass_none_rela <- plot_my_rela(model = bio_none, response_name = "No commercial value", upperl = 1, save_plot = FALSE)
+
+```
+
+
+## ternary plots
+
+all the data wrangling needed
+
+```{r}
+
+
+rela_diversity_df <- bind_rows(
+  td_richness_rela$rela,
+  td_shannon_rela$rela,
+  td_simpson_rela$rela,
+  fd_richness_rela$rela,
+  fd_shannon_rela$rela,
+  fd_simpson_rela$rela,
+  biomass_all_rela$rela) %>% 
+                        mutate(facet = case_when(
+                                      grepl("^TD", response) ~ "Taxonomic",
+                                      grepl("^FD", response) ~ "Functional",
+                                      response == "Native biomass" ~ "Biomass"),
+                               index = case_when(
+                                      grepl("richness", response, ignore.case = TRUE) ~ "Richness",
+                                      grepl("shannon", response, ignore.case = TRUE) ~ "Shannon",
+                                      grepl("simpson", response, ignore.case = TRUE) ~ "Simpson",
+                                      response == "Native biomass" ~ "Biomass"))
+
+div_colors <- c(
+  "TD richness" = "#08306B",
+  "TD shannon" = "#4292C6",
+  "TD simpson" = "#9ECAE1",
+  "FD richness" = "#67000D",
+  "FD shannon" = "#EF3B2C",
+  "FD simpson" = "#FCAE91",
+  "Native biomass" ="#41AE76"
+)
+
+```
+
+Ternary plot
+
+```{r}
+div_ternary <- ggtern(rela_diversity_df,
+                             aes(x = Temperature, y = Protection, z = NIS)) +
+  geom_point(aes(color = response, shape = response), size = 3.2, alpha = 0.95) +
+  labs(x = "Temperature", y = "Protection", z = "NIS", color = NULL, shape = NULL) +
+  scale_color_manual(values = div_colors) +
+  scale_shape_manual(values = c("TD richness" = 16,
+                                "TD shannon" = 16,
+                                "TD simpson" = 16,
+                                "FD richness" = 17,
+                                "FD shannon" = 17,
+                                "FD simpson" = 17,
+                                "Native biomass" = 15)) +
+  theme_bw(base_size = 8) +
+  theme_showarrows() +
+  theme(legend.position = "top",
+        legend.text = element_text(size = 8),
+        legend.key.size = unit(0.4, "cm"),
+        tern.axis.title.T = element_text(size = 10),
+        tern.axis.title.L = element_text(size = 10),
+        tern.axis.title.R = element_text(size = 10),
+        tern.axis.text.T = element_text(size = 7),
+        tern.axis.text.L = element_text(size = 7),
+        tern.axis.text.R = element_text(size = 7),
+        tern.axis.arrow.text.T = element_text(size = 7),
+        tern.axis.arrow.text.L = element_text(size = 7),
+        tern.axis.arrow.text.R = element_text(size = 7),
+        tern.panel.grid.major = element_line(color = "grey88", linewidth = 0.25),
+        plot.margin = margin(1, 1, 1, 1))
+
+div_ternary
+
+```
+
+
+
+```{r}
+# ggsave(here("4_relative importance", "Ternary_relative_importance_diversity.pdf"),
+#        plot = div_ternary, width = 8.5, height = 8.5, units = "cm")
+```
+
+
+
+### relative importance plots for biomass models
+
+```{r}
+
+rela_biomass_df <- bind_rows(
+  biomass_high_rela$rela,
+  biomass_medium_rela$rela,
+  biomass_none_rela$rela)
+
+
+rela_biomass_df <- rela_biomass_df %>%
+  mutate(response_short = recode(response,
+                                 "High commercial value" = "High",
+                                 "Medium commercial value" = "Medium",
+                                 "No commercial value" = "No value"))
+
+bio_colors <- c("High" = "#00798C",
+                "Medium" = "#70A288",
+                "No value" = "#D9ED92")
+
+```
+
+
+
+```{r}
+
+
+
+bio_ternary <- ggtern(rela_biomass_df,aes(x = NIS, y = Temperature, z = Protection)) +
+  geom_point(aes(color = response_short, size = response_short), shape = 16, alpha = 0.95) +
+  labs(x = "NIS", y = "Temperature", z = "Protection", color = NULL, size = NULL) +
+  scale_color_manual(values = bio_colors) +
+  scale_size_manual(values = c("Total" = 4.2,"High" = 3.0,"Medium" = 3.0,"No value" = 3.0)) +
+  theme_bw(base_size = 8) +
+  theme_showarrows() +
+  theme(legend.position = "right",
+        legend.text = element_text(size = 7),
+        legend.key.size = unit(0.35, "cm"),
+        tern.axis.title.T = element_text(size = 9),
+        tern.axis.title.L = element_text(size = 9),
+        tern.axis.title.R = element_text(size = 9),
+        tern.axis.text.T = element_text(size = 6),
+        tern.axis.text.L = element_text(size = 6),
+        tern.axis.text.R = element_text(size = 6),
+        tern.axis.arrow.text.T = element_text(size = 6),
+        tern.axis.arrow.text.L = element_text(size = 6),
+        tern.axis.arrow.text.R = element_text(size = 6),
+        tern.panel.grid.major = element_line(color = "grey90", linewidth = 0.2),
+        plot.margin = margin(3, 10, 3, 3))
+
+bio_ternary
+
+# ggsave(
+#   filename = here("4_relative importance", "Ternary_relative_importance_biomass.pdf"),
+#   plot = bio_ternary,
+#   width = 8.5,
+#   height = 8.5,
+#   units = "cm"
+# )
+```
+
+
+# Interaction model 
+
+create interaction model and prepare for ploting for each Y variable
+
+temp * protection 
+
+### TD Richness
+
+```{r}
+
+i_TD_richness<-lm(TD_richness ~ tmean *  protection ,data = diversity_table)
+
+summary(i_TD_richness)
+
+p_i_TD_richness <- ggpredict(i_TD_richness, 
+                       terms = c('tmean[16:24 by=0.5]',
+                                 "protection"))
+
+colnames(p_i_TD_richness)<-c("Temperature","predicted","std.error","conf.low","conf.high","Protection" )
+
+```
+
+
+### TD shannon
+
+
+```{r}
+i_TD_shannon<-lm(TD_shannon ~ tmean *  protection ,data = diversity_table)
+
+summary(i_TD_shannon)
+
+p_i_TD_shannon <- ggpredict(i_TD_shannon, 
+                       terms = c('tmean[16:24 by=0.5]',
+                                 "protection"))
+
+colnames(p_i_TD_shannon)<-c("Temperature","predicted","std.error","conf.low","conf.high","Protection" )
+
+
+```
+
+
+### TD simpson
+
+```{r}
+i_TD_simpson<-lm(log(TD_simpson) ~ tmean *  protection ,data = diversity_table)
+
+summary(i_TD_simpson)
+
+p_i_TD_simpson <- ggpredict(i_TD_simpson, 
+                       terms = c('tmean[16:24 by=0.5]',
+                                 "protection"))
+
+colnames(p_i_TD_simpson)<-c("Temperature","predicted","std.error","conf.low","conf.high","Protection" )
+
+
+
+```
+### FD richness
+
+```{r}
+i_FD_richness<-lm(FD_richness ~ tmean *  protection ,data = diversity_table)
+
+summary(i_FD_richness)
+
+p_i_FD_richness <- ggpredict(i_FD_richness, 
+                       terms = c('tmean[16:24 by=0.5]',
+                                 "protection"))
+
+colnames(p_i_FD_richness)<-c("Temperature","predicted","std.error","conf.low","conf.high","Protection" )
+```
+
+
+### FD shannon
+
+```{r}
+i_FD_shannon<-lm(FD_shannon ~ tmean *  protection ,data = diversity_table)
+
+summary(i_FD_shannon)
+
+p_i_FD_shannon <- ggpredict(i_FD_shannon, 
+                       terms = c('tmean[16:24 by=0.5]',
+                                 "protection"))
+
+colnames(p_i_FD_shannon)<-c("Temperature","predicted","std.error","conf.low","conf.high","Protection" )
+```
+### FD simpson
+
+
+```{r}
+i_FD_simpson<-lm(FD_simpson ~ tmean *  protection ,data = diversity_table)
+
+summary(i_FD_simpson)
+
+p_i_FD_simpson <- ggpredict(i_FD_simpson, 
+                       terms = c('tmean[16:24 by=0.5]',
+                                 "protection"))
+
+colnames(p_i_FD_simpson)<-c("Temperature","predicted","std.error","conf.low","conf.high","Protection" )
+
+
+
+```
+
+
+```{r}
+i_biomass<-lm(Native_biomass ~ tmean *  protection ,data = diversity_table)
+
+summary(i_biomass)
+
+p_i_biomass <- ggpredict(i_biomass, 
+                       terms = c('tmean[16:24 by=0.5]',
+                                 "protection"))
+
+colnames(p_i_biomass)<-c("Temperature","predicted","std.error","conf.low","conf.high","Protection" )
+```
+
+
+### interaction plot function & theme
+
+
+```{r}
+interaction_theme <- theme_classic(base_size = 8) +
+  theme(axis.text = element_text(size = 7),
+        axis.title = element_text(size = 9),
+        legend.position = c(0.68, 0.88),
+        legend.justification = c(0, 1),
+        legend.background = element_rect(fill = alpha("white", 0.75), color = NA),
+        legend.text = element_text(size = 8),
+        legend.title = element_blank(),
+        legend.key.size = unit(0.35, "cm"),
+        plot.margin = margin(3, 3, 3, 3))
+
+make_interaction_plot <- function(pred_data, raw_y, ylab_text, col_hex) {
+  ggplot(data = pred_data) +
+    geom_ribbon(aes(x = Temperature, ymin = conf.low, ymax = conf.high, fill = Protection), alpha = 0.2) +
+    geom_line(aes(x = Temperature, y = predicted, color = Protection), linewidth = 0.7) +
+    geom_point(data = diversity_table, aes(x = tmean, y = {{ raw_y }}, color = protection), alpha = 0.25, size = 0.8) +
+    xlab("Temperature (°C)") +
+    ylab(ylab_text) +
+    scale_color_manual(values = c("grey60", col_hex)) +
+    scale_fill_manual(values = c("grey60", col_hex)) +
+    guides(fill = "none") +
+    interaction_theme
+}
+
+```
+
+
+plot interaction plots
+
+```{r}
+
+
+p_td_rich <- make_interaction_plot(p_i_TD_richness, TD_richness, "TD richness", "#08306B")
+p_td_shan <- make_interaction_plot(p_i_TD_shannon, TD_shannon, "TD Shannon", "#4292C6")
+p_td_simp <- make_interaction_plot(p_i_TD_simpson, TD_simpson, "TD Simpson", "#9ECAE1")
+
+p_fd_rich <- make_interaction_plot(p_i_FD_richness, FD_richness, "FD richness", "#67000D")
+p_fd_shan <- make_interaction_plot(p_i_FD_shannon, FD_shannon, "FD Shannon", "#EF3B2C")
+p_fd_simp <- make_interaction_plot(p_i_FD_simpson, FD_simpson, "FD Simpson", "#FCAE91")
+
+p_biomass <- make_interaction_plot(p_i_biomass, Native_biomass, "Native biomass", "#41AE76")
+
+# combined layout
+
+
+layout_design <- "
+ABC
+DBE
+FGH
+"
+
+combined_diversity_figure <- wrap_plots(
+  A = p_td_rich,
+  B = div_ternary,
+  C = p_fd_rich,
+  D = p_td_shan,
+  E = p_fd_shan,
+  F = p_td_simp,
+  G = p_biomass,
+  H = p_fd_simp,
+  design = layout_design) + 
+  plot_layout(widths = c(1, 1.15, 1),
+              heights = c(1, 1, 1))
+
+combined_diversity_figure
+
+# ggsave(filename = here("4_relative importance",
+#                        "Combined_interactions_ternary_diversity.pdf"),
+#        plot = combined_diversity_figure,
+#        width = 24,
+#        height = 18,
+#        units = "cm")
+```
+
+
+### create the diversity multuple plot - old style
+
+
+```{r}
+p_a <- td_richness_rela[["plot"]]
+p_c <- td_shannon_rela[["plot"]]
+p_e <- td_simpson_rela[["plot"]]
+
+p_b <- fd_richness_rela[["plot"]]
+p_d <- fd_shannon_rela[["plot"]]
+p_f <- fd_simpson_rela[["plot"]]
+
+                       # 3 rows, 2 columns
+combined_plot <- (p_a | p_b) /
+                 (p_c | p_d) /
+                 (p_e | p_f)
+# View it
+combined_plot
+
+# ggsave("4_relative importance/All_relative_importance_panels.pdf", plot = combined_plot,width = 14, height = 12, dpi = 300)
+# ggsave("4_relative importance/All_relative_importance_panels.png", plot = combined_plot,width = 14, height = 12, dpi = 300)
+
+
+rm(p_a,p_b,p_c,p_d,p_e,p_f)
+```
+
+save table of all relative info
+
+```{r}
+rela_info<-rela_diversity_df %>% select(response,Temperature,Protection,NIS)
+rela_bio<- rela_biomass_df %>% select(response,Temperature,Protection,NIS)
+
+rela_info<-bind_rows(rela_info,rela_bio)
+
+r2_info <- tibble(
+  response = c("TD richness", "TD shannon", "TD simpson",
+               "FD richness", "FD shannon", "FD simpson",
+               "Native biomass", "High commercial value",
+               "Medium commercial value", "No commercial value"),
+  R2 = c(td_richness_rela$R2,
+         td_shannon_rela$R2,
+         td_simpson_rela$R2,
+         fd_richness_rela$R2,
+         fd_shannon_rela$R2,
+         fd_simpson_rela$R2,
+         biomass_all_rela$R2,
+         biomass_high_rela$R2,
+         biomass_medium_rela$R2,
+         biomass_none_rela$R2))
+
+rela_info <- rela_info %>%left_join(r2_info, by = "response")%>%
+  mutate(across(c(Temperature, Protection, NIS, R2), ~round(.x * 100, 1)))
+
+write_csv(rela_info,
+          here("4_relative importance",
+               "Table_relative_importance.csv"))
+
+```
+
+
+
+
