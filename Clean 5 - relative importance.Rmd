@@ -26,13 +26,14 @@ create the relative importance plots for all diversity and biomass facets (inclu
 
 *Output data:*
 
-* all relative importance plots
 
 * ternary plots + interactions for diversity & biomass
 
 * ternary plots for different commercial values 
 
+* Table_relative_importance.csv - the relative importance stored as a table 
 
+* bar-plot style relative importance
 
 ### load packages
 
@@ -43,12 +44,12 @@ library(patchwork)
 library(ggiraphExtra)
 library(ggeffects)
 library(ggtern)
+library(here)
 select<-dplyr::select
 
 rela_plots<-"4_relative importance"
 
 ```
-
 
 
 ### load data
@@ -58,7 +59,6 @@ rela_plots<-"4_relative importance"
 load(here("2_data_for_analyses", "medata_multistressor.rdata"))
 load(here("2_data_for_analyses", "site_biomass_commercial.rdata"))
 load(here("2_data_for_analyses", "final_commercial_list.rdata"))
-
 load(here("3_diversity tables", "diversity_table_natives.rdata"))
 
 ```
