@@ -49,6 +49,7 @@ library(FD)
 library(mFD)
 library(funrar)
 library(here)
+library(pbapply)
 
 select<-dplyr::select
 
@@ -213,7 +214,6 @@ use cmin, sc(n) = 0.9509548
 
 ```{r}
 
-
 diversity_table<-td.diversity
 
 diversity_table<-diversity_table %>% filter(sc_type=="Cmin")%>%  select(c(11:15,SC,Assemblage,Order.q,qTD))
@@ -229,7 +229,7 @@ diversity_table<- spread(diversity_table,key =Order.q,value = qTD)
 diversity_table<-left_join(diversity_table,site_biomass)
 
 ```
-### Functional diversity per site 
+## Functional diversity per site 
 
 ```{r}
 

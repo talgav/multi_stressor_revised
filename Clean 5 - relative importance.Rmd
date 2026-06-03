@@ -10,30 +10,41 @@ output:
 
 # In this script: 
 
-create the relative importance plots for all diversity and biomass facets (including differnt commertial values)
 
+# In this script:
+
+This script estimates the relative importance of temperature, protection, and invasive biomass for taxonomic diversity, functional diversity, and biomass responses. It first fits linear models for all diversity and biomass facets, including total native biomass and biomass split by commercial value. Relative importance is estimated using bootstrap-based `relaimpo` analyses and visualized as bar plots and ternary plots.
+
+The script also fits temperature × protection interaction models and creates interaction plots for diversity and native biomass responses. These interaction plots are combined with the ternary plot into a multi-panel figure.
+
+Finally, the script evaluates spatial autocorrelation using SAR error models. It selects a spatial neighborhood distance based on AIC, fits SAR models for all diversity and biomass responses, compares Moran’s I before and after SAR correction, extracts SAR-adjusted response values, and reruns relative importance analyses after removing the spatial component.
 
 *Input data:*
 
-* `diversity_table_natives.rdata` - rarefied TD and FD diversities of native communities
+* `diversity_table_natives.rdata` - rarefied TD and FD diversity estimates for native communities
 
-* `medata_multistressor.rdata` - medata clean for this project
+* `medata_multistressor.rdata` - cleaned Mediterranean fish transect metadata for this project
 
-* `site_biomass_commercial.rdata`- biomass divided by natives commercial value
+* `site_biomass_commercial.rdata` - biomass of native species split by commercial value
 
-* `final_commercial_list.rdata`- the final list of the species commercial values
-
+* `final_commercial_list.rdata` - final species-level commercial value classification
 
 *Output data:*
 
+* Ternary plots showing the relative importance of temperature, protection, and NIS for diversity and biomass responses
 
-* ternary plots + interactions for diversity & biomass
+* Temperature × protection interaction plots for diversity and native biomass responses
 
-* ternary plots for different commercial values 
+* Combined multi-panel figure with interaction plots and ternary plot
 
-* Table_relative_importance.csv - the relative importance stored as a table 
+* `Table_relative_importance.csv` - table of relative importance values and model R²
 
-* bar-plot style relative importance
+* `Moran_I_comparison_LM_vs_SAR.csv` - Moran’s I comparison before and after SAR correction
+
+* `coef_compare_LM_vs_SAR.csv` - comparison of LM and SAR coefficients, p-values, and significance changes
+
+* Ternary plots of relative importance after removing the spatial component
+
 
 ### load packages
 
@@ -45,6 +56,8 @@ library(ggiraphExtra)
 library(ggeffects)
 library(ggtern)
 library(here)
+library(spdep)
+library(spatialreg)
 select<-dplyr::select
 
 rela_plots<-"4_relative importance"
@@ -358,14 +371,11 @@ bio_colors <- c("High" = "#00798C",
 
 
 ```{r}
-
-
-
-bio_ternary <- ggtern(rela_biomass_df,aes(x = NIS, y = Temperature, z = Protection)) +
+bio_ternary <- ggtern(rela_biomass_df, aes(x = Temperature, y = Protection, z = NIS)) +
   geom_point(aes(color = response_short, size = response_short), shape = 16, alpha = 0.95) +
-  labs(x = "NIS", y = "Temperature", z = "Protection", color = NULL, size = NULL) +
+  labs(x = "Temperature", y = "Protection", z = "NIS", color = NULL, size = NULL) +
   scale_color_manual(values = bio_colors) +
-  scale_size_manual(values = c("Total" = 4.2,"High" = 3.0,"Medium" = 3.0,"No value" = 3.0)) +
+  scale_size_manual(values = c("Total" = 4.2, "High" = 3.0, "Medium" = 3.0, "No value" = 3.0)) +
   theme_bw(base_size = 8) +
   theme_showarrows() +
   theme(legend.position = "right",
@@ -384,6 +394,8 @@ bio_ternary <- ggtern(rela_biomass_df,aes(x = NIS, y = Temperature, z = Protecti
         plot.margin = margin(3, 10, 3, 3))
 
 bio_ternary
+
+
 
 # ggsave(
 #   filename = here("4_relative importance", "Ternary_relative_importance_biomass.pdf"),
@@ -650,6 +662,613 @@ write_csv(rela_info,
 
 ```
 
+# SAR models
+
+Step 1 — coordinates
+
+```{r}
+coords<- medata %>%
+         select(site_id,lat,lon) %>%
+         distinct() %>%
+         filter(site_id %in% diversity_table$Assemblage) %>%
+         group_by(site_id) %>%
+         summarise(lat = mean(lat),lon = mean(lon))
+
+colnames(coords)<-c("Assemblage","lat","lon")  
 
 
+diversity_table<-left_join(diversity_table,coords)
+
+diversity_table<-diversity_table %>% relocate(c(lat,lon),.after = tmean)
+
+rm(coords)
+
+coords <- cbind(diversity_table$lon, diversity_table$lat)
+```
+
+Step 2 - Distances set
+
+```{r}
+dists_km <- c(2, 10, 25, 50, 100, 250, 500, 1000, 2000)
+```
+
+
+Step 3 - fit one SAR model per distance
+
+ILL do it once for the richness model
+
+```{r}
+sar_results <- vector("list", length(dists_km))
+
+for (i in seq_along(dists_km)) {
+  
+  d <- dists_km[i]
+  
+  # neighbors within 0 to d km
+  
+  nb <- dnearneigh(coords, d1 = 0, d2 = d, longlat = TRUE)
+  
+  # how many observations have no neighbors?
+  n_isolates <- sum(card(nb) == 0)
+  
+  # if there are isolates, we can still create the weights object
+  lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+  
+  # try fitting the SAR error model
+  fit <- try(
+    errorsarlm(
+      TD_richness ~ tmean + protection + Invasive_biomass,
+      data = diversity_table,
+      listw = lw,
+      zero.policy = TRUE,
+      na.action = na.omit
+    ),
+    silent = TRUE
+  )
+  
+  sar_results[[i]] <- list(
+    distance_km = d,
+    nb = nb,
+    lw = lw,
+    n_isolates = n_isolates,
+    fit = fit,
+    aic = if (inherits(fit, "try-error")) NA else AIC(fit)
+  )
+}
+
+```
+
+
+Step 4 — AIC table
+
+```{r}
+aic_table <- data.frame(
+  distance_km = sapply(sar_results, `[[`, "distance_km"),
+  isolates    = sapply(sar_results, `[[`, "n_isolates"),
+  AIC         = sapply(sar_results, `[[`, "aic")
+)
+
+aic_table[order(aic_table$AIC), ]
+```
+
+set 250 m as the neighborhood
+
+clean env and run it for all models
+ 
+```{r}
+rm(fit,lw,nb,sar_results,best_nb,best_lw,best_sar,best_i,nb,aic_table,coords,n_isolates,i,d,dists_km)
+```
+
+function guide:
+
+•	`dnearneigh` → defines who is connected to whom
+•	`nb2listw` → defines how strongly they are connected
+•	`errorsarlm` → fits model accounting for spatial autocorrelation
+
+```{r}
+
+coords <- cbind(diversity_table$lon, diversity_table$lat)
+
+radius <- 250  # define neighborhood radius (250 km)
+
+# create neighbor structure: which sites are within 250 km of each other
+
+neighborhood <- dnearneigh(coords, 0, radius, longlat = TRUE)
+
+# convert neighbors into spatial weights (row-standardized, W style)
+
+spatial_weights <- nb2listw(neighborhood, style = "W", zero.policy = TRUE)
+
+
+```
+
+
+
+run the model + moran i test for each one of the variables + save results 
+
+
+diversity SAR models 
+
+```{r}
+sar_td_richness <- errorsarlm(
+  TD_richness ~ tmean + protection + Invasive_biomass,  # predictors
+  data = diversity_table,
+  listw = spatial_weights,        # spatial structure
+  zero.policy = TRUE     # allow sites with no neighbors
+)
+
+sar_td_shannon <- errorsarlm(
+  TD_shannon ~ tmean + protection + Invasive_biomass,  # predictors
+  data = diversity_table,
+  listw = spatial_weights,        # spatial structure
+  zero.policy = TRUE     # allow sites with no neighbors
+)
+
+sar_td_simpson <- errorsarlm(
+  log(TD_simpson) ~ tmean + protection + Invasive_biomass,  # predictors
+  data = diversity_table,
+  listw = spatial_weights,        # spatial structure
+  zero.policy = TRUE     # allow sites with no neighbors
+)
+
+
+sar_fd_richness <- errorsarlm(
+  FD_richness ~ tmean + protection + Invasive_biomass,  # predictors
+  data = diversity_table,
+  listw = spatial_weights,        # spatial structure
+  zero.policy = TRUE     # allow sites with no neighbors
+)
+
+
+sar_fd_shannon <- errorsarlm(
+  FD_shannon ~ tmean + protection + Invasive_biomass,  # predictors
+  data = diversity_table,
+  listw = spatial_weights,        # spatial structure
+  zero.policy = TRUE     # allow sites with no neighbors
+)
+
+
+sar_fd_simpson <- errorsarlm(
+  FD_simpson ~ tmean + protection + Invasive_biomass,  # predictors
+  data = diversity_table,
+  listw = spatial_weights,        # spatial structure
+  zero.policy = TRUE     # allow sites with no neighbors
+)
+
+```
+
+biomass sar models
+
+```{r}
+# reorder high and none to match diversity_table
+
+high <- high %>% mutate(Assemblage = factor(Assemblage, levels = diversity_table$Assemblage)) %>% arrange(Assemblage) %>% mutate(Assemblage = as.character(Assemblage))
+
+none <- none %>% mutate(Assemblage = factor(Assemblage, levels = diversity_table$Assemblage)) %>% arrange(Assemblage) %>% mutate(Assemblage = as.character(Assemblage))
+
+# reorder medium as much as possible
+
+medium <- medium %>% mutate(Assemblage = factor(Assemblage, levels = diversity_table$Assemblage)) %>% arrange(Assemblage) %>% mutate(Assemblage = as.character(Assemblage))
+
+# separate weights only for medium
+
+coords_for_m<-diversity_table %>% select(Assemblage,lat,lon)
+
+medium<-left_join(medium,coords_for_m)
+
+# Get the coords for medium
+
+coords_medium <- cbind(medium$lon, medium$lat)
+nb_medium <- dnearneigh(coords_medium, 0, 250, longlat = TRUE)
+spatial_weights_medium <- nb2listw(nb_medium, style = "W", zero.policy = TRUE)
+
+# SAR biomass models
+
+sar_biomass <- errorsarlm(log(Native_biomass) ~ tmean + protection + Invasive_biomass,
+                          data = diversity_table, listw = spatial_weights, zero.policy = TRUE)
+
+sar_bio_high <- errorsarlm(log(Native_biomass) ~ tmean + protection + Invasive_biomass,
+                           data = high, listw = spatial_weights, zero.policy = TRUE)
+
+sar_bio_medium <- errorsarlm(log(Native_biomass) ~ tmean + protection + Invasive_biomass,
+                             data = medium, listw = spatial_weights_medium, zero.policy = TRUE)
+
+sar_bio_none <- errorsarlm(log(Native_biomass) ~ tmean + protection + Invasive_biomass,
+                           data = none, listw = spatial_weights, zero.policy = TRUE)
+
+```
+
+
+save moran.I tests for sar and regular models 
+
+
+
+```{r}
+# LM models
+
+lm_models <- list(
+  TD_richness = TD_richness,
+  TD_shannon  = TD_shannon,
+  TD_simpson  = TD_simpson,
+  FD_richness = FD_richness,
+  FD_shannon  = FD_shannon,
+  FD_simpson  = FD_simpson,
+  Biomass     = Biomass,
+  High        = bio_high,
+  Medium      = bio_medium,
+  None        = bio_none)
+
+# SAR models
+
+sar_models <- list(
+  TD_richness = sar_td_richness,
+  TD_shannon  = sar_td_shannon,
+  TD_simpson  = sar_td_simpson,
+  FD_richness = sar_fd_richness,
+  FD_shannon  = sar_fd_shannon,
+  FD_simpson  = sar_fd_simpson,
+  Biomass     = sar_biomass,
+  High        = sar_bio_high,
+  Medium      = sar_bio_medium,
+  None        = sar_bio_none)
+
+# biomass medium had different weights because 1 transect was missing
+
+weights_list <- list(
+  TD_richness = spatial_weights,
+  TD_shannon  = spatial_weights,
+  TD_simpson  = spatial_weights,
+  FD_richness = spatial_weights,
+  FD_shannon  = spatial_weights,
+  FD_simpson  = spatial_weights,
+  Biomass     = spatial_weights,
+  High        = spatial_weights,
+  Medium      = spatial_weights_medium,
+  None        = spatial_weights)
+```
+
+
+
+```{r}
+moran_compare <- data.frame(
+  Response = names(sar_models),
+  Moran_LM = sapply(names(lm_models), function(x)
+    moran.test(
+      residuals(lm_models[[x]]),
+      weights_list[[x]],
+      zero.policy = TRUE
+    )$estimate[1]),
+  P_LM = sapply(names(lm_models), function(x)
+    moran.test(
+      residuals(lm_models[[x]]),
+      weights_list[[x]],
+      zero.policy = TRUE
+    )$p.value),
+  Moran_SAR = sapply(names(sar_models), function(x)
+    moran.test(
+      residuals(sar_models[[x]]),
+      weights_list[[x]],
+      zero.policy = TRUE
+    )$estimate[1]),
+  P_SAR = sapply(names(sar_models), function(x)
+    moran.test(
+      residuals(sar_models[[x]]),
+      weights_list[[x]],
+      zero.policy = TRUE
+    )$p.value)
+)
+
+moran_compare
+
+#write_csv(moran_compare,here("6_SAR","Moran_I_comparison_LM_vs_SAR.csv"))
+
+```
+
+
+
+
+organised the sar_model results into a data-set
+
+ signal + trend = fit 
+ signal = spatial component for the sar
+ trend = the predictions based on the coefficents 
+
+
+
+```{r}
+organize_sar <- function(model, response_name) {
+  
+  pred <- as.data.frame(predict(model))
+  
+  pred$residuals <- residuals(model)
+  
+  pred$response <- pred$trend + pred$residuals
+  
+  pred <- pred %>% select(response)
+  
+  colnames(pred) <- response_name
+  
+  return(pred)
+}
+
+
+
+
+a <- organize_sar(model = sar_td_richness,response_name = "td_richness_ns")
+b <- organize_sar(model = sar_td_shannon,response_name = "td_shannon_ns")
+c <- organize_sar(model = sar_td_simpson,response_name = "td_simpson_ns")
+d <- organize_sar(model = sar_fd_richness,response_name = "fd_richness_ns")
+e <- organize_sar(model = sar_fd_shannon,response_name = "fd_shannon_ns")
+f <- organize_sar(model = sar_fd_simpson,response_name = "fd_simpson_ns")
+
+no_spatial_df <- bind_cols(a, b, c, d, e, f)
+
+rm(a,b,c,d,e,f)
+
+no_spatial_df <- bind_cols(
+  diversity_table %>%
+    select(Assemblage, tmean, protection, Invasive_biomass),
+  no_spatial_df
+)
+
+```
+
+
+
+
+```{r}
+# extract no-spatial response
+bio_a <- organize_sar(model = sar_biomass, response_name = "biomass_ns")
+bio_b <- organize_sar(model = sar_bio_high, response_name = "bio_high_ns")
+bio_c <- organize_sar(model = sar_bio_medium, response_name = "bio_medium_ns")
+bio_d <- organize_sar(model = sar_bio_none, response_name = "bio_none_ns")
+
+# add predictors
+biomass_ns_df <- bind_cols(diversity_table %>% select(Assemblage, tmean, protection, Invasive_biomass), bio_a)
+high_ns_df <- bind_cols(high %>% select(Assemblage, tmean, protection, Invasive_biomass), bio_b)
+medium_ns_df <- bind_cols(medium %>% select(Assemblage, tmean, protection, Invasive_biomass), bio_c)
+none_ns_df <- bind_cols(none %>% select(Assemblage, tmean, protection, Invasive_biomass), bio_d)
+
+
+```
+
+
+construct models without spatial component for relative importance analyses
+
+This models will be used to estimate the relative importance witout the spatial component 
+
+```{r}
+TD_richness_no_spa <- lm(td_richness_ns ~ tmean + protection + Invasive_biomass,data = no_spatial_df)
+TD_shannon_no_spa <- lm(td_shannon_ns ~ tmean + protection + Invasive_biomass,data = no_spatial_df)
+TD_simpson_no_spa <- lm(td_simpson_ns ~ tmean + protection + Invasive_biomass,data = no_spatial_df)
+
+FD_richness_no_spa <- lm(fd_richness_ns ~ tmean + protection + Invasive_biomass,data = no_spatial_df)
+FD_shannon_no_spa <- lm(fd_shannon_ns ~ tmean + protection + Invasive_biomass,data = no_spatial_df)
+FD_simpson_no_spa <- lm(fd_simpson_ns ~ tmean + protection + Invasive_biomass,data = no_spatial_df)
+
+
+Biomass_no_spa <- lm(biomass_ns ~ tmean + protection + Invasive_biomass, data = biomass_ns_df)
+
+bio_high_no_spa <- lm(bio_high_ns ~ tmean + protection + Invasive_biomass, data = high_ns_df)
+bio_medium_no_spa <- lm(bio_medium_ns ~ tmean + protection + Invasive_biomass, data = medium_ns_df)
+bio_none_no_spa <- lm(bio_none_ns ~ tmean + protection + Invasive_biomass, data = none_ns_df)
+
+```
+
+compare the coefficient and save the tables
+
+
+
+# compar SAR and regular models
+
+```{r}
+extract_coef_compare <- function(lm_model, sar_model, response_name) {
+  
+  lm_tab <- as.data.frame(summary(lm_model)$coefficients)
+  sar_tab <- as.data.frame(summary(sar_model)$Coef)
+  
+  lm_tab$term <- rownames(lm_tab)
+  sar_tab$term <- rownames(sar_tab)
+  
+  lm_tab <- lm_tab %>% select(term, LM_estimate = Estimate, LM_p = `Pr(>|t|)`)
+  sar_tab <- sar_tab %>% select(term, SAR_estimate = Estimate, SAR_p = `Pr(>|z|)`)
+  
+  out <- left_join(lm_tab, sar_tab, by = "term") %>%
+    mutate(response = response_name,
+           estimate_diff = SAR_estimate - LM_estimate,
+           LM_sig = case_when(LM_p < 0.001 ~ "***", LM_p < 0.01 ~ "**", LM_p < 0.05 ~ "*", LM_p < 0.1 ~ ".", TRUE ~ ""),
+           SAR_sig = case_when(SAR_p < 0.001 ~ "***", SAR_p < 0.01 ~ "**", SAR_p < 0.05 ~ "*", SAR_p < 0.1 ~ ".", TRUE ~ "")) %>%
+    select(response, term, LM_estimate, LM_p, LM_sig, SAR_estimate, SAR_p, SAR_sig, estimate_diff)
+  
+  return(out)
+}
+```
+
+
+```{r}
+coef_td_rich <- extract_coef_compare(TD_richness, sar_td_richness, "TD richness")
+coef_td_shan <- extract_coef_compare(TD_shannon, sar_td_shannon, "TD Shannon")
+coef_td_simp <- extract_coef_compare(TD_simpson, sar_td_simpson, "TD Simpson")
+coef_fd_rich <- extract_coef_compare(FD_richness, sar_fd_richness, "FD richness")
+coef_fd_shan <- extract_coef_compare(FD_shannon, sar_fd_shannon, "FD Shannon")
+coef_fd_simp <- extract_coef_compare(FD_simpson, sar_fd_simpson, "FD Simpson")
+coef_biomass <- extract_coef_compare(Biomass, sar_biomass, "Total biomass")
+coef_high <- extract_coef_compare(bio_high, sar_bio_high, "High commercial")
+coef_medium <- extract_coef_compare(bio_medium, sar_bio_medium, "Medium commercial")
+coef_none <- extract_coef_compare(bio_none, sar_bio_none, "No commercial")
+
+```
+
+
+```{r}
+coef_compare_all <- bind_rows(
+  coef_td_rich, coef_td_shan, coef_td_simp,
+  coef_fd_rich, coef_fd_shan, coef_fd_simp,
+  coef_biomass, coef_high, coef_medium, coef_none
+)
+
+```
+
+
+
+```{r}
+coef_compare_all <- coef_compare_all %>%
+  mutate(
+    sig_change = case_when(
+      LM_p < 0.05 & SAR_p >= 0.05 ~ "Lost significance",
+      LM_p >= 0.05 & SAR_p < 0.05 ~ "Gained significance",
+      LM_p < 0.05 & SAR_p < 0.05 ~ "Stayed significant",
+      TRUE ~ "Stayed non-significant"
+    ),
+    
+    direction_change = sign(LM_estimate) != sign(SAR_estimate),
+    
+    overall_change = case_when(
+      direction_change ~ "Direction changed",
+      sig_change == "Lost significance" ~ "Lost significance",
+      sig_change == "Gained significance" ~ "Gained significance",
+      TRUE ~ "No important change"
+    )
+  )
+
+#write_csv(coef_compare_all,here("6_SAR","coef_compare_LM_vs_SAR.csv"))
+
+```
+
+plot ternary plot for diversity+biomass and for the commercial values separtions
+
+```{r}
+td_richness_rela_ns <- plot_my_rela(model = TD_richness_no_spa, response_name = "TD richness", upperl = 0.7, save_plot = FALSE)
+td_shannon_rela_ns <- plot_my_rela(model = TD_shannon_no_spa, response_name = "TD shannon", upperl = 1, save_plot = FALSE)
+td_simpson_rela_ns <- plot_my_rela(model = TD_simpson_no_spa, response_name = "TD simpson", upperl = 1, save_plot = FALSE)
+
+fd_richness_rela_ns <- plot_my_rela(model = FD_richness_no_spa, response_name = "FD richness", upperl = 0.7, save_plot = FALSE)
+fd_shannon_rela_ns <- plot_my_rela(model = FD_shannon_no_spa, response_name = "FD shannon", upperl = 1, save_plot = FALSE)
+fd_simpson_rela_ns <- plot_my_rela(model = FD_simpson_no_spa, response_name = "FD simpson", upperl = 1, save_plot = FALSE)
+
+biomass_all_rela_ns <- plot_my_rela(model = Biomass_no_spa, response_name = "Native biomass", upperl = 1, save_plot = FALSE)
+
+biomass_high_rela_ns <- plot_my_rela(model = bio_high_no_spa, response_name = "High commercial value", upperl = 1, save_plot = FALSE)
+biomass_medium_rela_ns <- plot_my_rela(model = bio_medium_no_spa, response_name = "Medium commercial value", upperl = 1, save_plot = FALSE)
+biomass_none_rela_ns <- plot_my_rela(model = bio_none_no_spa, response_name = "No commercial value", upperl = 1, save_plot = FALSE)
+```
+
+
+
+
+```{r}
+rela_diversity_df_ns <- bind_rows(
+  td_richness_rela_ns$rela,
+  td_shannon_rela_ns$rela,
+  td_simpson_rela_ns$rela,
+  fd_richness_rela_ns$rela,
+  fd_shannon_rela_ns$rela,
+  fd_simpson_rela_ns$rela,
+  biomass_all_rela_ns$rela
+) %>%
+  mutate(facet = case_when(
+    grepl("^TD", response) ~ "Taxonomic",
+    grepl("^FD", response) ~ "Functional",
+    response == "Native biomass" ~ "Biomass"),
+    index = case_when(
+      grepl("richness", response, ignore.case = TRUE) ~ "Richness",
+      grepl("shannon", response, ignore.case = TRUE) ~ "Shannon",
+      grepl("simpson", response, ignore.case = TRUE) ~ "Simpson",
+      response == "Native biomass" ~ "Biomass"))
+```
+
+```{r}
+div_ternary_ns <- ggtern(rela_diversity_df_ns,
+                         aes(x = Temperature, y = Protection, z = NIS)) +
+  geom_point(aes(color = response, shape = response), size = 3.2, alpha = 0.95) +
+  labs(x = "Temperature", y = "Protection", z = "NIS", color = NULL, shape = NULL) +
+  scale_color_manual(values = div_colors) +
+  scale_shape_manual(values = c("TD richness" = 16,
+                                "TD shannon" = 16,
+                                "TD simpson" = 16,
+                                "FD richness" = 17,
+                                "FD shannon" = 17,
+                                "FD simpson" = 17,
+                                "Native biomass" = 15)) +
+  theme_bw(base_size = 8) +
+  theme_showarrows() +
+  theme(legend.position = "top",
+        legend.text = element_text(size = 8),
+        legend.key.size = unit(0.4, "cm"),
+        tern.axis.title.T = element_text(size = 10),
+        tern.axis.title.L = element_text(size = 10),
+        tern.axis.title.R = element_text(size = 10),
+        tern.axis.text.T = element_text(size = 7),
+        tern.axis.text.L = element_text(size = 7),
+        tern.axis.text.R = element_text(size = 7),
+        tern.axis.arrow.text.T = element_text(size = 7),
+        tern.axis.arrow.text.L = element_text(size = 7),
+        tern.axis.arrow.text.R = element_text(size = 7),
+        tern.panel.grid.major = element_line(color = "grey88", linewidth = 0.25),
+        plot.margin = margin(1, 1, 1, 1))
+
+div_ternary_ns
+
+# ggsave(here("6_SAR",
+#             "Ternary_relative_importance_diversity_no_spatial.pdf"),
+#             plot = div_ternary_ns,
+#             width = 8.5, height = 8.5, units = "cm")
+```
+
+biomass plots
+
+
+```{r}
+rela_biomass_df_ns <- bind_rows(
+  biomass_high_rela_ns$rela,
+  biomass_medium_rela_ns$rela,
+  biomass_none_rela_ns$rela
+) %>%
+  mutate(response_short = recode(response,
+                                 "High commercial value" = "High",
+                                 "Medium commercial value" = "Medium",
+                                 "No commercial value" = "No value"))
+
+bio_ternary_ns <- ggtern(
+  rela_biomass_df_ns,
+  aes(x = Temperature,
+      y = Protection,
+      z = NIS)) + geom_point(
+    aes(color = response_short,
+        size = response_short),
+    shape = 16,
+    alpha = 0.95) +
+  labs(x = "Temperature",y = "Protection",z = "NIS",color = NULL, size = NULL) +
+  scale_color_manual(values = bio_colors) +
+  scale_size_manual(values = c(
+    "High" = 3.0,
+    "Medium" = 3.0,
+    "No value" = 3.0)) +
+  theme_bw(base_size = 8) +
+  theme_showarrows() +
+  theme(
+    legend.position = "right",
+    legend.text = element_text(size = 7),
+    legend.key.size = unit(0.35, "cm"),
+    tern.axis.title.T = element_text(size = 9),
+    tern.axis.title.L = element_text(size = 9),
+    tern.axis.title.R = element_text(size = 9),
+    tern.axis.text.T = element_text(size = 6),
+    tern.axis.text.L = element_text(size = 6),
+    tern.axis.text.R = element_text(size = 6),
+    tern.axis.arrow.text.T = element_text(size = 6),
+    tern.axis.arrow.text.L = element_text(size = 6),
+    tern.axis.arrow.text.R = element_text(size = 6),
+    tern.panel.grid.major = element_line(color = "grey90", linewidth = 0.2),
+    plot.margin = margin(3, 10, 3, 3))
+
+bio_ternary_ns
+
+# ggsave(here("6_SAR","Ternary_relative_importance_biomass_no_spatial.pdf"),
+#   plot = bio_ternary_ns,
+#   width = 8.5,
+#   height = 8.5,
+#   units = "cm")
+
+```
 

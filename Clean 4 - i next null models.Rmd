@@ -9,26 +9,29 @@ output:
 ---
 # In this script:
 
-i-next calculation to rarefy TD and FD diversity for native communities
+This script creates an abundance-based null model in which invasive individuals in warm-water transects (tmean ≥ 19°C) are replaced by randomly drawn native species. Native replacement species are sampled with replacement from the native species pool, weighted by their total abundance, so common native species are more likely to be selected. The script then calculates rarefied taxonomic diversity (TD) and functional diversity (FD) for each null community and combines the resulting diversity metrics with site-level metadata and biomass data.
 
 *Input data:*
 
+* `medata_multistressor.rdata` - cleaned Mediterranean fish transect data for this project
 
-* `medata_multistressor.rdata` - medata clean for this project
+* `species_traits_multistressor.rdata` - cleaned and imputed species trait data
 
-* `species_traits_multistressor.rdata` - traits data clean for this project with imputations
+* `site_biomass.rdata` - site-level native, invasive, and total biomass estimates
 
-* `site_biomass.rdata` - table of the native and total biomass per site
+* input files are located in the `2_data_for_analyses` folder
 
-* input files are at `2_data_for_analyses` folder
+*Output data:*
 
-*output data:*
+* `results_td_list.Rdata` - rarefied TD estimates for all null communities
 
-* `diversity_table_natives.rdata` - rarefied TD and FD diversities of native communities
+* `results_fd_null_list.Rdata` - rarefied FD estimates for all null communities; saved separately because this step is computationally intensive
 
-* `results_FD_native_only.Rdata` - since it computational heavy this sub-table is also saved for easier down stream code fixes 
+* `null_abundance_diversity_df.Rdata` - final combined table of TD, FD, biomass, and metadata for all null iterations
 
-* outputs saved in `3_diversity tables` folder
+* outputs are saved in the `3_diversity tables` folder
+
+
 
 ### Load packeges
 
@@ -55,7 +58,7 @@ select<-dplyr::select
 c_min <- 0.9540893
 ```
 
-### load data
+### Load data
 
 ```{r}
 
@@ -68,7 +71,7 @@ load(here("2_data_for_analyses", "site_biomass.rdata"))
 ```
 
 
-functions:
+# Functions
 
 
 ```{r}
@@ -80,8 +83,7 @@ draw_native_species <- function(n) {
     replace = TRUE,
     prob = natives_pool$total_abundance
   )
-}
-
+} 
 
 create_null_community <- function() {
   
@@ -132,14 +134,13 @@ site_id<- t(site_id)
     return(site_id)
 }
 
-
 process_td_results <- function(results_td) {
   
   td.diversity <- left_join(results_td, meta.data)
   
   td.diversity$enforcement <- as.factor(td.diversity$enforcement)
  
-   diversity_table <- td.diversity %>%
+  diversity_table <- td.diversity %>%
   select(c(11:14, SC, Assemblage, Order.q, qTD)) %>%
   mutate(Order.q = case_when(
   Order.q == 0 ~ "TD_richness",
@@ -169,10 +170,30 @@ return(site_id_fd)
 
 }
 
+process_fd_results <- function(results_fd) {
+  
+  fd.diversity <- left_join(results_fd, meta.data)
+  
+  fd.diversity$enforcement <- as.factor(fd.diversity$enforcement)
+ 
+  diversity_table_FD <- fd.diversity %>%
+  select(c(11:14, SC, Assemblage, Order.q, qFD)) %>%
+  mutate(Order.q = case_when(
+  Order.q == 0 ~ "FD_richness",
+  Order.q == 1 ~ "FD_shannon",
+  Order.q == 2 ~ "FD_simpson")) %>%
+  spread(key = Order.q, value = qFD) 
+
+  return(diversity_table_FD)
+
+}
+
 ```
 
 
-### ill start with filtering only transect of >19
+# Data wrangling 
+
+filtering only transect of >19
 
 ```{r}
 
@@ -180,9 +201,9 @@ medata_19<-medata %>% filter(tmean>=19)
 
 ```
 
-# null model based on abundance
+# Null model based on abundance
 
-### (1) count how many invasive individuals and species i have in each transect (how many native species fillers I need here)
+(1) count how many invasive individuals and species i have in each transect (how many native species fillers I need here) 
 
 ```{r}
 invasive_count <-medata_19 %>% group_by(unique_trans_id,exotic) %>% 
@@ -194,7 +215,7 @@ invasive_count$exotic<-NULL
 
 ```
 
-### (2) Build a species pool
+(2) Build a species pool
 
 based on the natives that are found in temp > 19 degree
 
@@ -204,13 +225,14 @@ natives_pool <-medata_19 %>% filter(exotic == "Native") %>% group_by(species) %>
 
 ```
 
+get transects meta data
 
 ```{r}
 transect_mdata<-medata_19 %>% select(1:22) %>% distinct()
 ```
 
 
-keep trait for natives only (>19)
+(3) keep trait for natives only (>19)
 
 
 ```{r}
@@ -225,8 +247,6 @@ convert to gower distance matrix and save in "data.matrix" format
 
 ```{r include=FALSE}
 
-
-
 # add the species as row names
 
 my_traits <- species_traits_native %>% filter(species %in% natives_pool$species)%>% column_to_rownames(var="species") 
@@ -239,9 +259,9 @@ keep <- rownames(traits_gower_matrix)
 
 ```
 
-# create the 100 null communities
+(4) create the 100 null communities using the `create_null_community()` function
 
-```{r}
+```{r message=FALSE, warning=FALSE}
 
 set.seed(1)
 
@@ -252,19 +272,23 @@ identical(null_medata_list[[1]], null_medata_list[[2]]) # should be false
 
 ```
 
+# Run TD and FD calcultions
+
+TD calc
 
 ```{r}
 
+# results_td_list <- lapply(null_medata_list,function(x) estimate3D(
+#       x,
+#       diversity = "TD",
+#       q = c(0, 1, 2),
+#       datatype = "abundance",
+#       base = "coverage",
+#       level = c_min))
 
-results_td_list <- lapply(null_medata_list,function(x) estimate3D(
-      x,
-      diversity = "TD",
-      q = c(0, 1, 2),
-      datatype = "abundance",
-      base = "coverage",
-      level = c_min))
+#save(results_td_list, file = here("3_diversity tables", "results_td_list.Rdata"))
 
-
+load(here("3_diversity tables", "results_td_list.Rdata"))
 
 # connect to the medata
 
@@ -283,54 +307,231 @@ null_diversity_tables <- lapply(results_td_list, process_td_results)
 
 ```
 
+calculate functional diversity for each null community
 
 ```{r}
-results_fd_test <- pblapply(null_medata_list[1:2], function(x) {
+# results_fd_test <- pblapply(null_medata_list, function(x) {
+# 
+#   site_id_fd <- make_fd_matrix(x)
+# 
+#   estimate3D(site_id_fd,
+#              diversity = "FD",
+#              q = c(0, 1, 2),
+#              FDdistM = traits_gower_dist,
+#              datatype = "abundance",
+#              base = "coverage",
+#              level = c_min)})
 
-  site_id_fd <- make_fd_matrix(x)
+#save(results_fd_test, file = here("3_diversity tables", "results_fd_null_list.Rdata"))
 
-  estimate3D(site_id_fd,
-             diversity = "FD",
-             q = c(0, 1, 2),
-             FDdistM = traits_gower_dist,
-             datatype = "abundance",
-             base = "coverage",
-             level = c_min)})
+load(here("3_diversity tables", "results_fd_null_list.Rdata"))
+```
+
+Process the FD nulls
+
+```{r message=FALSE, warning=FALSE}
+null_diversity_tables_FD <- lapply(results_fd_test, process_fd_results)
+```
+
+
+# Unite the FD and TD and orgenize
+
+```{r}
+
+null_abundance_diversity <- Map(left_join,null_diversity_tables,null_diversity_tables_FD)
+
+
+null_abundance_diversity <- lapply(
+  seq_along(null_abundance_diversity),
+  function(i) {
+    null_abundance_diversity[[i]] %>%
+      mutate(iteration = i, .before = 1)
+  }
+)
+
+null_abundance_diversity_df <- bind_rows(null_abundance_diversity)
+
+null_abundance_diversity_df$site_id<-NULL
+
+null_abundance_diversity_df<-null_abundance_diversity_df %>% rename( Native_biomass=mean_native_biomass,
+                                             Invasive_biomass=mean_invasive_biomass)
+
+null_abundance_diversity_df<-null_abundance_diversity_df %>% 
+  relocate(Native_biomass,.after = FD_simpson)%>%
+  relocate(Invasive_biomass,.after = FD_simpson) 
+
+
+null_abundance_diversity_df<-null_abundance_diversity_df %>% 
+  relocate(mean_total_biomass,.after = Invasive_biomass )%>% rename(Total_biomass = mean_total_biomass)
+
+
+null_abundance_diversity_df$protection<-as.factor(null_abundance_diversity_df$protection)
+
+#save(null_abundance_diversity_df, file = here("3_diversity tables", "null_abundance_diversity_df.Rdata"))
+```
+
+# Species based null model
+
+set 'replace' instead of any name of invasive
+
+```{r}
+medata_replacement<- medata_19
+
+medata_replacement<-medata_replacement %>% 
+  mutate(species = case_when(exotic == "Invasive" ~ "replace",
+                             exotic == "Native" ~ species))
+```
+
+for each unique_trans_id in medata_replacement, if there is species named replace, choose randomly a species from the native pool to replace it. however, it need to be species that do not already appear in the transect and when adding new species it need to be without replacement so the same species can not be choose more than once.
+
+```{r message=FALSE, warning=FALSE}
+
+replace_species_in_transect <- function(df) {
+  
+  n_replace <- sum(df$species == "replace")
+  
+  if (n_replace == 0) return(df)
+  
+  species_already_present <- df %>%
+    filter(species != "replace") %>%
+    pull(species) %>%
+    unique()
+  
+  candidate_pool <- natives_pool %>%
+    filter(!species %in% species_already_present)
+  
+  if (n_replace > nrow(candidate_pool)) {
+    stop("Not enough native species available to replace invasives in one transect")
+  }
+  
+  new_species <- sample(candidate_pool$species,
+                        size = n_replace,
+                        replace = FALSE)
+  
+  df$species[df$species == "replace"] <- new_species
+  
+  return(df)
+}
+
+create_species_null <- function() {
+
+  medata_replacement_native <- medata_replacement %>%
+    group_by(unique_trans_id) %>%
+    group_modify(~replace_species_in_transect(.x)) %>%
+    ungroup()
+
+  return(medata_replacement_native)
+}
+
+set.seed(1)
+
+null_species_list <- replicate(
+  100,
+  create_species_null(),
+  simplify = FALSE
+)
+
+make_fd_matrix_species_null <- function(null_data) {
+  
+  site_id <- null_data %>%
+    group_by(across(1:23)) %>%
+    summarise(amount = sum(sp.n), .groups = "drop") %>%
+    spread(species, amount, fill = 0) %>%
+    mutate(site_id = paste(Site, enforcement, tmean, sep = "_"), .after = Site) %>%
+    drop_na(tmean)
+  
+  site_id <- site_id %>%
+    select(site_id, 23:ncol(site_id)) %>%
+    group_by(site_id) %>%
+    summarise(across(.fns = sum), .groups = "drop") %>%
+    column_to_rownames(var = "site_id")
+  
+  site_id <- t(site_id)
+  
+  site_id_fd <- as.data.frame(site_id)
+  
+  site_id_fd <- site_id_fd %>%
+    filter(row.names(site_id_fd) %in% keep)
+  
+  site_id_fd <- data.matrix(site_id_fd)
+  
+  return(site_id_fd)
+}
+
+null_species_fd_matrix_list <- lapply(null_species_list, make_fd_matrix_species_null)
+
+# note - the sampling of new species was in the transect level while here i have pooling in the site_id level and there for the number of natives can change a but (i.e, chromis apperd in most transect in the site but was absent in on and thus could be added as replacement for invasive in this transect resulting in a different number of chromis along iterations)
+
 ```
 
 
 
 ```{r}
-results_fd_list <- pblapply(null_medata_list, function(x) {
+  # results_species_null_fd <- pblapply(null_species_fd_matrix_list, function(site_id_fd) {
+  #   # estimate3D(site_id_fd,
+  #            diversity = "FD",
+  #            q = c(0, 1, 2),
+  #            FDdistM = traits_gower_dist,
+  #            datatype = "abundance",
+  #            base = "coverage",
+  #            level = c_min)})
 
-  site_id_fd <- make_fd_matrix(x)
+#save(results_species_null_fd, file = here("3_diversity tables", "results_fd_null_species_list.Rdata"))
 
-  estimate3D(site_id_fd,
-             diversity = "FD",
-             q = c(0, 1, 2),
-             FDdistM = traits_gower_dist,
-             datatype = "abundance",
-             base = "coverage",
-             level = c_min)})
-
-```
-
-
-
-```{r}
-results_fd_list <- pblapply(null_medata_list, function(x) {
-
-  site_id_fd <- make_fd_matrix(x)
-
-  estimate3D(site_id_fd,
-             diversity = "FD",
-             q = c(0, 1, 2),
-             FDdistM = traits_gower_dist,
-             datatype = "abundance",
-             base = "coverage",
-             level = c_min)})
+load(here("3_diversity tables", "results_fd_null_species_list.Rdata"))
 
 ```
 
+```{r message=FALSE, warning=FALSE}
+null_diversity_tables_FD_species <- lapply(results_species_null_fd, process_fd_results)
 
+# for simplicity and script convenience i unite it here with the TD data from last analyses - will be later omitted!
+
+
+null_species_diversity <- Map(left_join,null_diversity_tables,null_diversity_tables_FD_species)
+
+# set iteration number
+
+null_species_diversity <- lapply(
+  seq_along(null_species_diversity),
+  function(i) {
+    null_species_diversity[[i]] %>%
+      mutate(iteration = i, .before = 1)
+  }
+)
+
+# convert to data frame
+
+null_species_diversity_df <- bind_rows(null_species_diversity)
+
+# remove redundant column
+
+null_species_diversity_df$site_id<-NULL
+
+# format data table
+
+null_species_diversity_df<-null_species_diversity_df %>% rename( Native_biomass=mean_native_biomass,
+                                             Invasive_biomass=mean_invasive_biomass)
+
+null_species_diversity_df<-null_species_diversity_df %>% 
+  relocate(Native_biomass,.after = FD_simpson)%>%
+  relocate(Invasive_biomass,.after = FD_simpson) 
+
+
+null_species_diversity_df<-null_species_diversity_df %>% 
+  relocate(mean_total_biomass,.after = Invasive_biomass )%>% rename(Total_biomass = mean_total_biomass)
+
+
+null_species_diversity_df$protection<-as.factor(null_species_diversity_df$protection)
+
+# set TD indexes to NA
+
+null_species_diversity_df$TD_richness<-rep(NA)
+null_species_diversity_df$TD_shannon<-rep(NA)
+null_species_diversity_df$TD_simpson<-rep(NA)
+
+# save
+
+#save(null_species_diversity_df, file = here("3_diversity tables", "null_species_diversity_df.Rdata"))
+```
 
